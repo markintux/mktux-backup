@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mktux-backup"
+version = "0.1.0"
+description = "Local, auditable backups for websites hosted across multiple providers."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Marcos Vinicius" }]
+dependencies = [
+    "paramiko>=3.5,<5",
+    "pydantic>=2.7,<3",
+    "PyMySQL>=1.1,<2",
+    "python-dotenv>=1.0,<2",
+    "PyYAML>=6.0,<7",
+    "rich>=13.7,<15",
+    "zstandard>=0.23,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2,<2",
+    "pytest>=8,<10",
+    "ruff>=0.9",
+]
+
+[project.scripts]
+mktux-backup = "mktux_backup.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]

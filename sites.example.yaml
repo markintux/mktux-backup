@@ -1,0 +1,71 @@
+version: 1
+
+backup:
+  destination: "/Volumes/Backups/sites"
+  state_directory: ".mktux-backup"
+  concurrency: 2
+  compression_level: 1
+  free_space_margin_percent: 20
+
+sites:
+  - id: "site-sftp"
+    enabled: true
+    files:
+      protocol: "sftp"
+      host: "server.example.com"
+      port: 22
+      username_env: "SITE_EXAMPLE_SSH_USER"
+      password_env: "SITE_EXAMPLE_SSH_PASSWORD"
+      timeout_seconds: 30
+      key_file: null
+      key_passphrase_env: null
+      allow_agent: true
+      look_for_keys: true
+      known_hosts_file: null
+      paths:
+        - remote: "/home/conta/site/storage/app"
+          archive_as: "storage-app"
+        - remote: "/home/conta/site/public/uploads"
+          archive_as: "uploads"
+    database:
+      enabled: true
+      host: "mysql.example.com"
+      port: 3306
+      name: "site_database"
+      username_env: "SITE_EXAMPLE_DB_USER"
+      password_env: "SITE_EXAMPLE_DB_PASSWORD"
+      tls: "preferred"
+
+  - id: "site-ftp"
+    enabled: true
+    files:
+      protocol: "ftp"
+      host: "ftp.example.com"
+      port: 21
+      username_env: "SITE_FTP_USER"
+      password_env: "SITE_FTP_PASSWORD"
+      timeout_seconds: 30
+      allow_insecure: true
+      passive: true
+      paths:
+        - remote: "/public_html/uploads"
+          archive_as: "uploads"
+    database:
+      enabled: false
+
+  - id: "site-ftps-disabled"
+    enabled: false
+    files:
+      protocol: "ftps"
+      host: "ftp-seguro.example.com"
+      port: 21
+      username_env: "SITE_FTPS_USER"
+      password_env: "SITE_FTPS_PASSWORD"
+      timeout_seconds: 30
+      passive: true
+      verify_certificate: true
+      paths:
+        - remote: "/public_html/uploads"
+          archive_as: "uploads"
+    database:
+      enabled: false
