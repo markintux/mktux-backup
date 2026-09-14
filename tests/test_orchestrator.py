@@ -184,7 +184,9 @@ def test_preflight_failure_is_recorded_as_partial_run(tmp_path: Path, monkeypatc
     assert result.status == RunStatus.COMPLETED_WITH_ERRORS
     assert result.failed_sites == {"site-sftp": "host indisponível"}
     assert result.successful_sites == ("site-ftp",)
-    manifest = json.loads((result.final_path / "run-manifest.json").read_text())
+    manifest = json.loads(
+        (result.final_path / "run-manifest.json").read_text(encoding="utf-8")
+    )
     assert manifest["failed_sites"] == {"site-sftp": "host indisponível"}
     state = StateStore(loaded.state_directory).read()
     assert state["sites"]["site-sftp"]["stage"] == "preflight"  # type: ignore[index]

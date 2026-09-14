@@ -16,6 +16,8 @@ from typing import Any, BinaryIO, Self
 from mktux_backup.errors import LockError
 from mktux_backup.security import SecretRedactor
 
+LOCK_SENTINEL = b" "
+
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -145,7 +147,7 @@ def _try_lock(handle: BinaryIO) -> bool:
         import msvcrt
 
         if os.fstat(handle.fileno()).st_size == 0:
-            handle.write(b" ")
+            handle.write(LOCK_SENTINEL)
             handle.flush()
             handle.seek(0)
         try:
@@ -191,7 +193,9 @@ class RunLock:
         try:
             with path.open("r+b") as handle:
                 active = not _try_lock(handle)
-                handle.seek(0)
+                # Windows denies reads from a byte range locked by another
+                # handle. Byte zero is reserved so metadata remains readable.
+                handle.seek(1 if os.name == "nt" and active else 0)
                 raw = handle.read().decode("utf-8").strip()
                 if not active:
                     _unlock(handle)
@@ -226,7 +230,7 @@ class RunLock:
         }
         handle.seek(0)
         handle.truncate()
-        handle.write((json.dumps(payload) + "\n").encode("utf-8"))
+        handle.write(LOCK_SENTINEL + (json.dumps(payload) + "\n").encode("utf-8"))
         handle.flush()
         os.fsync(handle.fileno())
         self._handle = handle
@@ -239,7 +243,7 @@ class RunLock:
         assert self._handle is not None
         self._handle.seek(0)
         self._handle.truncate()
-        self._handle.write(b"{}\n")
+        self._handle.write(LOCK_SENTINEL + b"{}\n")
         self._handle.flush()
         os.fsync(self._handle.fileno())
         _unlock(self._handle)
