@@ -16,6 +16,8 @@ executa a CLI.
 - SFTP com validação estrita da chave do host;
 - FTP passivo, aceito apenas com autorização explícita;
 - FTPS explícito com verificação de certificado por padrão;
+- recuperação de transferências FTP e FTPS com tentativas limitadas, retomada
+  por byte e renovação periódica da conexão de controle;
 - um banco MySQL opcional por site;
 - `mysqldump` sem lock de tabelas e com snapshot transacional para InnoDB;
 - compactação em fluxo, sem cópia descompactada intermediária;
@@ -80,6 +82,10 @@ Edite o YAML com hosts e caminhos. Coloque os valores secretos somente no
 `.env`; os campos terminados em `_env` recebem o nome da variável, nunca a senha
 em texto puro. Variáveis já definidas no processo têm prioridade sobre o `.env`.
 
+`sites.yaml`, `.env`, os snapshots reais em `backups/sites` e diretórios
+temporários em `restores` ficam fora do Git. Somente
+`backups/sites/.gitkeep` preserva a estrutura local do destino.
+
 O destino é global e precisa existir antes do preflight. Caminhos relativos de
 `destination`, `state_directory`, `key_file` e `known_hosts_file` são resolvidos
 a partir do diretório do `sites.yaml`.
@@ -111,6 +117,12 @@ allow_insecure: true
 
 Quando a hospedagem oferecer FTPS explícito, prefira `protocol: ftps`. A
 verificação do certificado vem ligada; desligá-la gera aviso no preflight.
+
+Em FTP e FTPS, o modo binário é reafirmado antes de cada arquivo e a conexão de
+controle é renovada a cada 100 arquivos concluídos. Se a transferência cair, o
+cliente reconecta e retoma do último byte recebido usando FTP `REST`, com até
+três novas tentativas. Se o servidor não aceitar a retomada ou as tentativas se
+esgotarem, o site falha em vez de aceitar um arquivo truncado.
 
 ### MySQL
 

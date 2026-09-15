@@ -19,6 +19,8 @@ the provider's external database endpoint.
 - SFTP without requiring a usable remote shell.
 - FTP with an explicit insecure-protocol opt-in.
 - Explicit FTPS with certificate verification enabled by default.
+- FTP and FTPS transfer recovery with bounded retries, byte-offset resume, and
+  periodic control-connection renewal.
 - Zero or one MySQL database per site.
 - File-only, database-only, or combined backups.
 - Concurrent site processing with configurable limits.
@@ -101,6 +103,13 @@ site is sequential, which limits pressure on a small hosting account:
 5. when enabled, `mysqldump` output is streamed directly to
    `database.sql.zst`;
 6. the site manifest and checksum list are written after its artifacts finish.
+
+For FTP and FTPS, binary mode is reaffirmed before every file and the control
+connection is renewed after every 100 completed files. If a data transfer is
+interrupted, the client reconnects and resumes from the last received byte with
+FTP `REST`, for up to three retries after the initial attempt. A server that
+cannot resume the file, or a transfer that exhausts those retries, fails the
+site instead of accepting a truncated artifact.
 
 The database command uses options including `--single-transaction`, `--quick`,
 `--skip-lock-tables`, routines, events, triggers, and binary-safe hexadecimal
@@ -260,8 +269,10 @@ Then:
 8. run `mktux-backup verify <completed-run-directory>`;
 9. copy the verified run directory to the external drive.
 
-`sites.yaml`, `.env`, `.mktux-backup`, and `.harness` are excluded from Git by
-the repository's `.gitignore` rules.
+`sites.yaml`, `.env`, `.mktux-backup`, `.harness`, real snapshots under
+`backups/sites`, and temporary restore directories under `restores` are
+excluded from Git by the repository's `.gitignore` rules. Only
+`backups/sites/.gitkeep` preserves the local snapshot directory structure.
 
 ## Configuration files
 

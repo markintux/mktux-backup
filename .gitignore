@@ -1,5 +1,6 @@
 .env
 sites.yaml
+.DS_Store
 .harness/
 .venv/
 .mktux-backup/
@@ -12,3 +13,8 @@ __pycache__/
 htmlcov/
 build/
 dist/
+
+# Backups reais ficam no projeto, mas nunca devem entrar no Git.
+/backups/sites/*
+!/backups/sites/.gitkeep
+/restores/

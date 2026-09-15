@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import ftplib
+import io
 import posixpath
 import socket
 import ssl
-import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -17,14 +17,148 @@ from mktux_backup.models import FtpFiles, FtpsFiles
 from mktux_backup.transfers.base import EntryKind, FileInventory, RemoteEntry, sorted_inventory
 
 
+class _RetryingFtpReader(io.RawIOBase):
+    _MAX_RETRIES = 3
+    _READ_ALL_CHUNK_SIZE = 1024 * 1024
+
+    def __init__(self, source: FtpSource, entry: RemoteEntry) -> None:
+        super().__init__()
+        self.source = source
+        self.entry = entry
+        self.offset = 0
+        self.retries = 0
+        self.data_socket: socket.socket | None = None
+        self.reader: BinaryIO | None = None
+        self.finished = False
+        self._open_with_retry()
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        if self.closed:
+            raise ValueError("I/O operation on closed FTP stream")
+        if size == 0 or self.finished:
+            return b""
+        if size < 0:
+            chunks: list[bytes] = []
+            while chunk := self.read(self._READ_ALL_CHUNK_SIZE):
+                chunks.append(chunk)
+            return b"".join(chunks)
+
+        chunks = []
+        remaining = size
+        while remaining:
+            chunk = self._read_once(remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _read_once(self, size: int) -> bytes:
+        while True:
+            assert self.reader is not None
+            try:
+                read = getattr(self.reader, "read1", None) or self.reader.read
+                chunk = read(size)
+            except (OSError, ftplib.Error, EOFError) as error:
+                self._recover(error)
+                continue
+            if chunk:
+                self.offset += len(chunk)
+                return chunk
+
+            try:
+                self._complete_transfer()
+            except (OSError, ftplib.Error, EOFError) as error:
+                self._recover(error)
+                continue
+            if self.offset < self.entry.size:
+                self._recover(
+                    TransferError(
+                        f"{self.entry.remote_path} terminou antes do esperado: "
+                        f"{self.offset}/{self.entry.size} bytes"
+                    )
+                )
+                continue
+            self.finished = True
+            self.source._files_since_connect += 1
+            return b""
+
+    def _open_with_retry(self) -> None:
+        while True:
+            try:
+                if self.source.client is None:
+                    self.source._connect()
+                client = self.source._client()
+                client.voidcmd("TYPE I")
+                command = f"RETR {self.entry.remote_path}"
+                if self.offset:
+                    self.data_socket = client.transfercmd(command, rest=self.offset)
+                else:
+                    self.data_socket = client.transfercmd(command)
+                self.data_socket.settimeout(self.source.config.timeout_seconds)
+                self.reader = self.data_socket.makefile("rb")
+                return
+            except (OSError, ftplib.Error, EOFError) as error:
+                self._close_data()
+                self.source._discard_connection()
+                if self.retries >= self._MAX_RETRIES:
+                    self._raise_exhausted(error)
+                self.retries += 1
+
+    def _recover(self, error: BaseException) -> None:
+        self._close_data()
+        self.source._discard_connection()
+        if self.retries >= self._MAX_RETRIES:
+            self._raise_exhausted(error)
+        self.retries += 1
+        self._open_with_retry()
+
+    def _complete_transfer(self) -> None:
+        self._close_data()
+        self.source._client().voidresp()
+
+    def _close_data(self) -> None:
+        if self.reader is not None:
+            self.reader.close()
+            self.reader = None
+        if self.data_socket is not None:
+            self.data_socket.close()
+            self.data_socket = None
+
+    def _raise_exhausted(self, error: BaseException) -> None:
+        raise TransferError(
+            f"falha ao ler {self.entry.remote_path} após "
+            f"{self._MAX_RETRIES + 1} tentativa(s), retomando do byte {self.offset}: {error}"
+        ) from error
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self._close_data()
+        if not self.finished:
+            self.source._discard_connection()
+        super().close()
+
+
 class FtpSource:
+    _MAX_FILES_PER_CONNECTION = 100
+
     def __init__(self, config: FtpFiles | FtpsFiles, username: str, password: str) -> None:
         self.config = config
         self.username = username
         self.password = password
         self.client: ftplib.FTP | None = None
+        self._files_since_connect = 0
 
     def __enter__(self) -> Self:
+        self._connect()
+        return self
+
+    def _connect(self) -> None:
+        self.close()
         try:
             if isinstance(self.config, FtpsFiles):
                 context = (
@@ -42,7 +176,7 @@ class FtpSource:
             client.set_pasv(self.config.passive)
             client.voidcmd("TYPE I")
             self.client = client
-            return self
+            self._files_since_connect = 0
         except (OSError, ftplib.Error) as error:
             self.close()
             raise TransferError(
@@ -64,6 +198,16 @@ class FtpSource:
             except OSError:
                 pass
         self.client = None
+
+    def _discard_connection(self) -> None:
+        client = self.client
+        self.client = None
+        self._files_since_connect = 0
+        if client is not None:
+            try:
+                client.close()
+            except OSError:
+                pass
 
     def inventory(self) -> FileInventory:
         client = self._client()
@@ -180,29 +324,13 @@ class FtpSource:
     def open_file(self, entry: RemoteEntry) -> Iterator[BinaryIO]:
         if entry.kind != EntryKind.FILE:
             raise TransferError(f"não é um arquivo remoto: {entry.remote_path}")
-        client = self._client()
-        data_socket: socket.socket | None = None
-        reader: BinaryIO | None = None
+        if self._files_since_connect >= self._MAX_FILES_PER_CONNECTION:
+            self._connect()
+        reader = _RetryingFtpReader(self, entry)
         try:
-            data_socket = client.transfercmd(f"RETR {entry.remote_path}")
-            data_socket.settimeout(self.config.timeout_seconds)
-            reader = data_socket.makefile("rb")
             yield reader
-        except (OSError, ftplib.Error) as error:
-            raise TransferError(f"falha ao ler {entry.remote_path}: {error}") from error
         finally:
-            active_error = sys.exc_info()[0] is not None
-            if reader is not None:
-                reader.close()
-            if data_socket is not None:
-                data_socket.close()
-            try:
-                client.voidresp()
-            except (OSError, ftplib.Error, EOFError) as error:
-                if not active_error:
-                    raise TransferError(
-                        f"servidor não confirmou a transferência de {entry.remote_path}: {error}"
-                    ) from error
+            reader.close()
 
     def _ensure_directory(self, client: ftplib.FTP, path: str) -> None:
         if not self._is_directory(client, path):
