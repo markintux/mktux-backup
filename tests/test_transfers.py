@@ -18,6 +18,7 @@ class FakeFtp:
         self.current = "/"
         self.directories = {"/", "/uploads", "/uploads/nested"}
         self.responses = 0
+        self.commands: list[str] = []
 
     def pwd(self) -> str:
         return self.current
@@ -38,14 +39,20 @@ class FakeFtp:
             )
         return iter([("data.txt", {"type": "file", "size": "3"})])
 
-    def transfercmd(self, command: str) -> socket.socket:
+    def transfercmd(self, command: str, rest: int | None = None) -> socket.socket:
         reader, writer = socket.socketpair()
         writer.sendall(b"data")
         writer.close()
         return reader
 
+    def voidcmd(self, command: str) -> None:
+        self.commands.append(command)
+
     def voidresp(self) -> None:
         self.responses += 1
+
+    def close(self) -> None:
+        pass
 
 
 def test_ftp_inventory_recurses_and_skips_links() -> None:
@@ -70,7 +77,114 @@ def test_ftp_inventory_recurses_and_skips_links() -> None:
     file_entry = next(entry for entry in result.files if entry.remote_path.endswith("photo.jpg"))
     with source.open_file(file_entry) as handle:
         assert handle.read() == b"data"
+    assert source.client.commands == ["TYPE I"]  # type: ignore[union-attr]
     assert source.client.responses == 1  # type: ignore[union-attr]
+
+
+def test_ftp_renews_connection_after_transfer_limit(monkeypatch) -> None:
+    config = FtpFiles.model_validate(
+        {
+            "protocol": "ftp",
+            "host": "ftp.example.com",
+            "username_env": "USER",
+            "password_env": "PASSWORD",
+            "allow_insecure": True,
+            "paths": [{"remote": "/uploads", "archive_as": "uploads"}],
+        }
+    )
+    source = FtpSource(config, "user", "password")
+    original = FakeFtp()
+    replacement = FakeFtp()
+    source.client = original  # type: ignore[assignment]
+    source._files_since_connect = source._MAX_FILES_PER_CONNECTION
+
+    def reconnect() -> None:
+        source.client = replacement  # type: ignore[assignment]
+        source._files_since_connect = 0
+
+    monkeypatch.setattr(source, "_connect", reconnect)
+    entry = RemoteEntry("/uploads/photo.jpg", "uploads/photo.jpg", EntryKind.FILE, size=4)
+
+    with source.open_file(entry) as handle:
+        assert handle.read() == b"data"
+
+    assert original.commands == []
+    assert replacement.commands == ["TYPE I"]
+    assert replacement.responses == 1
+    assert source._files_since_connect == 1
+
+
+def test_ftp_resumes_file_after_timeout(monkeypatch) -> None:
+    class PartialReader:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read1(self, size: int) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                return b"da"
+            raise TimeoutError("timed out")
+
+        def close(self) -> None:
+            pass
+
+    class FakeDataSocket:
+        def __init__(self, reader) -> None:
+            self.reader = reader
+
+        def settimeout(self, timeout: int) -> None:
+            pass
+
+        def makefile(self, mode: str):
+            return self.reader
+
+        def close(self) -> None:
+            pass
+
+    class FailingFtp(FakeFtp):
+        def transfercmd(self, command: str, rest: int | None = None):
+            return FakeDataSocket(PartialReader())
+
+    class ResumeFtp(FakeFtp):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rests: list[int | None] = []
+
+        def transfercmd(self, command: str, rest: int | None = None) -> socket.socket:
+            self.rests.append(rest)
+            reader, writer = socket.socketpair()
+            writer.sendall(b"ta")
+            writer.close()
+            return reader
+
+    config = FtpFiles.model_validate(
+        {
+            "protocol": "ftp",
+            "host": "ftp.example.com",
+            "username_env": "USER",
+            "password_env": "PASSWORD",
+            "allow_insecure": True,
+            "paths": [{"remote": "/uploads", "archive_as": "uploads"}],
+        }
+    )
+    source = FtpSource(config, "user", "password")
+    replacement = ResumeFtp()
+    source.client = FailingFtp()  # type: ignore[assignment]
+
+    def reconnect() -> None:
+        source.client = replacement  # type: ignore[assignment]
+        source._files_since_connect = 0
+
+    monkeypatch.setattr(source, "_connect", reconnect)
+    entry = RemoteEntry("/uploads/photo.jpg", "uploads/photo.jpg", EntryKind.FILE, size=4)
+
+    with source.open_file(entry) as handle:
+        assert handle.read(4) == b"data"
+        assert handle.read(1) == b""
+
+    assert replacement.rests == [2]
+    assert replacement.responses == 1
+    assert source._files_since_connect == 1
 
 
 @dataclass
